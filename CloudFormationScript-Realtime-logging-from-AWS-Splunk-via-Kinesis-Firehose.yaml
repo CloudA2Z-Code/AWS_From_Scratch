@@ -1,69 +1,86 @@
-############
-### Cloudformation script to push realtime collect logs from VPC, cloudwatch Cloudwatch events into kinesis firehose and into Splunk for analysis ###
-### Does contiain code to implement AWS Serverless Application Model (SAM) for Lambda as well ###
-############
+# Pre-Requirements:
+# - HEC endpoints are considered available and reachable
+# - Least necessary permissions listed below are assigned to the pipeline role which will run the CFT in respective environments non-prod, prod etc.
+#   "firehose:*", "events:*", "s3:*", "logs:*", "lambda:*"
+#   Consideration:
+#   ==============
+#   Only 1 VPC is considered below, where we are capturing VPC Flow logs for the VPC. So inorder to run this CFT script fill the paramater 'VpcName' with VPC.
+#   PreRequisite : zip the lambda_function.py and and upload in a s3 bucket i.e. lambdas-kinesis2splunk-eu-central-1 to be deployed, unless lamdas not changed there is no need redeploy each time. It's only one time effort.
+#                  e.g: unlitimate code uri should look like this - s3://lambdas-kinesis2splunk-eu-central-1/VPC/lambda_function.py.zip
+#   PreRequisite to delete the stack : Empty bucket content of CWEBackupS3Bucket, S3BucketBkp
+#   PreRequisite to create the stack : Delete log Group 'VPCtoSplunkLogGroup'
+
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: This Template deploys a Kinesis Firehose for Splunk.
-
+###
+### Template input parameters
+###  
 Parameters:
   SplunkHecURL:
     Type: String
-    Default: 'https://xyz.com:8088'  #
-
+    Default: 'https://x.x.x.x:8088'  #'https://xyz.com:8088'
+  
   SplunkHecToken:
     Type: String
-    Default: '1234-************-3421'
-
+    Default: 'xxxx-xxxx-xxxxx-xxxxx'
+  
   VpcName:
     Type: AWS::EC2::VPC::Id
     Description: VPC Identifier
-    Default: vpc-1234*** #Edge-vpc in networking account
-
+    Default: vpc-xxxxxxxxx #Tracking logs of an existing VPC
+  
   BucketNameValue:
     Type: String
     Default: eu-west-1-lambda
-  
+    
   LogGroupNameLabel:
     Type: String
-    Default: VPCtoSplunkLogGroup2
-  
+    Default: VPCtoSplunkLogGroup
+    
   CWtoFHRoleName:
     Type: String
-    Default: CWtoFHRole2
-
+    Default: CloudWatchtoFireHoseRole
+  
   VCPtoCloudwatchRoleName:
     Type: String
-    Default: VCPtoCloudwatchRole2
-
+    Default: VCPtoCloudwatchRole
+  
   Workvalue:
     Type: String
     Default: -work02
-  
+    
   FunctionLambda4FirehoseNameCWE:
     Type: String
-    Default: FunctionLambda4FirehoseCWE1
-
+    Default: FunctionLambda4FirehoseCWE
+  
   FunctionLambda4FirehoseNameCWL:
     Type: String
-    Default: FunctionLambda4FirehoseCWL1
-
+    Default: FunctionLambda4FirehoseCWL
+  
   FunctionLambda4FirehoseNameVPC:
     Type: String
-    Default: FunctionLambda4FirehoseVPC1
+    Default: FunctionLambda4FirehoseVPC
   
-  FireHoseRoleName:
+  VPCFireHoseRoleName:
     Type: String
-    Default: FireHoseRole2
+    Default: VPCFirehoseProcessorRole
   
-  FlowLogsToSplunkName:
+  VPCFlowLogsToSplunkDeliveryStreamName:
     Type: String
-    Default: FlowLogsToSplunk2
+    Default: VPCFlowLogsToSplunkDeliveryStream
   
-  # WriteLambdaLogsName:
-  #   Type: String
-  #   Default: WriteLambdaLogs2
-
+  CWLToFirehoseDeliveryStreamName:
+    Type: String
+    Default: CWLFirehoseDeliveryStream
+  
+  CWEToFirehoseDeliveryStreamName:
+    Type: String
+    Default: CWEFirehoseDeliveryStream
+  
+###
+### Template Resources
+###
 Resources:
   ### Firehose's work bucket
   S3BucketBkp:
@@ -77,93 +94,9 @@ Resources:
       VersioningConfiguration:
         Status: Enabled
 
-  ### Firehose Role for Streams + Inline policy for the Role
-  FireHoseRole:
-    Type: 'AWS::IAM::Role'
-    Properties:
-      RoleName: !Ref FireHoseRoleName
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-              - firehose.amazonaws.com
-            Action:
-              - 'sts:AssumeRole'
-      Path: "/"
-      Policies:
-        - PolicyName: firehose_2_splunk_policy
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action: 
-                  - 's3:AbortMultipartUpload'
-                  - 's3:GetBucketLocation'
-                  - 's3:GetObject'
-                  - 's3:ListBucket'
-                  - 's3:ListBucketMultipartUploads'
-                  - 's3:PutObject'
-                Resource: 
-                  - !Sub 'arn:aws:s3:::${BucketNameValue}'
-                  - !Sub 'arn:aws:s3:::${S3BucketBkp}'
-                  - !Sub 'arn:aws:s3:::${S3BucketBkp}/*'
-              - Effect: Allow
-                Action:
-                  - 'lambda:GetFunctionConfiguration'
-                  - 'lambda:InvokeFunction'
-                Resource:
-                  - !GetAtt VPCFirehoseProcessorLambdaFunction.Arn
-                  - !Join [':',[!GetAtt VPCFirehoseProcessorLambdaFunction.Arn,'$LATEST']]
-              - Effect: Allow
-                Action:
-                  - 'logs:PutLogEvents'
-                Resource:
-                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/kinesisfirehose/${FlowLogsToSplunkName}:log-stream:*'
-              - Effect: Allow
-                Action: 
-                  - 'kinesis:DescribeStream'
-                  - 'kinesis:GetShardIterator'
-                  - 'kinesis:GetRecords'
-                  - 'kinesis:ListShards'
-                Resource:
-                  - !Sub 'arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/%FIREHOSE_POLICY_TEMPLATE_PLACEHOLDER%'
-
-  ### Lambda Function that unzips files
-  ### Firehose that sends VPC Flow logs to Splunk
-  FHtoSplunk:
-    Type: 'AWS::KinesisFirehose::DeliveryStream'
-    Properties:
-      DeliveryStreamName: !Ref FlowLogsToSplunkName
-      DeliveryStreamType: DirectPut
-      SplunkDestinationConfiguration:
-        HECAcknowledgmentTimeoutInSeconds: 180
-        HECEndpoint: !Ref SplunkHecURL
-        HECEndpointType: Raw
-        HECToken: !Ref SplunkHecToken
-        ProcessingConfiguration:
-          Enabled: true
-          Processors:
-            - Parameters:
-              - ParameterName: LambdaArn
-                ParameterValue: !GetAtt VPCFirehoseProcessorLambdaFunction.Arn
-              - ParameterName: RoleArn
-                ParameterValue: !GetAtt FireHoseRole.Arn
-              Type: Lambda
-        RetryOptions:
-          DurationInSeconds: 300
-        S3BackupMode: FailedEventsOnly
-        S3Configuration: 
-          RoleARN: !GetAtt FireHoseRole.Arn
-          BucketARN: !Sub 'arn:aws:s3:::${S3BucketBkp}'
-          BufferingHints:
-            IntervalInSeconds: 60
-            SizeInMBs: 50
-          CompressionFormat: UNCOMPRESSED
-          Prefix: firehose/
-
-  ###Role for VPC FlowLogs
+  #------------------------------------------------------------------------------
+  # VPC LOGS : Fetching VPC FlowLogs and pushing into splunk via kinesis firehose
+  #------------------------------------------------------------------------------
   FlowLogsRole:
     Type: 'AWS::IAM::Role'
     Properties:
@@ -192,14 +125,14 @@ Resources:
                   - logs:PutLogEvents
                 Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
 
-  ### Cloudwatch Log Group
+  # ### Cloudwatch Log Group
   CloudwatchGroup:
-    Type: 'AWS::Logs::LogGroup'
+    Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Ref LogGroupNameLabel
       RetentionInDays: 1
-
-  ### VPC Flow Log resource creation
+  
+  # ### VPC Flow Log resource creation
   VPCFlowGroup:
     Type: AWS::EC2::FlowLog
     Properties: 
@@ -210,7 +143,7 @@ Resources:
       ResourceType: VPC
       TrafficType: ALL
 
-  ###Role for the sending from Cloudwatch to Firehose
+  # ###Role for the sending from Cloudwatch to Firehose
   CWtoFHRole:
     Type: 'AWS::IAM::Role'
     Properties:
@@ -241,7 +174,7 @@ Resources:
           - Effect: Allow
             Action:
               - 'firehose:*'
-            Resource: !GetAtt FHtoSplunk.Arn
+            Resource: !GetAtt VPCFirehoseDeliveryStream.Arn
           - Effect: Allow
             Action:
               - 'iam:PassRole'
@@ -249,19 +182,10 @@ Resources:
       Roles:
         - !Ref CWtoFHRole
 
-  ####Subscription filter construction
-  SubscriptionFilter:
-    Type: 'AWS::Logs::SubscriptionFilter'
-    Properties:
-      DestinationArn: !GetAtt FHtoSplunk.Arn
-      FilterPattern: ""
-      LogGroupName: !Ref CloudwatchGroup
-      RoleArn: !GetAtt CWtoFHRole.Arn
-  
-  ##### CWE #####
-
-  ##### CloudTrail Event #####
+  #-------------------------------------------------------------------------------------------------------------------------------
+  # CloudTrail Event LOGS : Fetching CloudTrail Event and pushing into splunk via kinesis firehose
   # Source - CloudTrail - Event Rule to get notifications of activities in CloudTrail into Firehose and Splunk - AWS::Events::Rule
+  #-------------------------------------------------------------------------------------------------------------------------------
   CloudTrailEventRule:
     Type: AWS::Events::Rule
     Properties:
@@ -333,8 +257,11 @@ Resources:
             Effect: Allow
       Roles:
         - Ref: CWEFirehoseDeliveryRole
-  ##### CloudTrail Event #####
-
+  #-------------------------------------------------------------------------------------------------------------------------------
+  # CloudWatch Event LOGS : Fetching Cloudwatch Event logs and pushing into splunk via kinesis firehose
+  # Source - CloudWatch - Event Rule to get notifications of activities in CloudTrail into Firehose and Splunk - AWS::Events::Rule
+  #-------------------------------------------------------------------------------------------------------------------------------  
+  ##### CWE #####
   ### Lambda Function that unzips files related to Cloudwatch Events(CWE)
   # Source - Firehose Components - FireHose Processor - AWS::Lambda::Function      
   CWEFirehoseProcessorLambdaFunction:
@@ -343,7 +270,7 @@ Resources:
       Description: Stream events from CloudWatch Events to Splunk using HTTP event collector
       MemorySize: 512
       FunctionName: !Ref FunctionLambda4FirehoseNameCWE
-      CodeUri: ./src/CWE
+      CodeUri: s3://lambdas-kinesis2splunk-eu-central-1/CWE/lambda_function.py.zip  #Local Reference use './src/CWE'
       Handler: lambda_function.handler
       Runtime: python3.7
       Timeout: 300
@@ -380,6 +307,11 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: "*"
+              - Effect: Allow
+                Action:
+                  - firehose:PutRecord
+                  - firehose:PutRecordBatch
+                Resource: "arn:aws:firehose:eu-central-1:xxxxxxxxxxxxx:*"
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -409,11 +341,11 @@ Resources:
             IntervalInSeconds: 300
             SizeInMBs: 1
         HECEndpointType: Event
-        HECToken: 1234-***********-3421
+        HECToken: !Ref SplunkHecToken
         HECAcknowledgmentTimeoutInSeconds: 180
         RetryOptions:
           DurationInSeconds: 300
-        HECEndpoint: https://xyz.com:8088
+        HECEndpoint: !Ref SplunkHecURL
         S3BackupMode: FailedEventsOnly
         ProcessingConfiguration:
           Enabled: true
@@ -431,6 +363,7 @@ Resources:
                       - Arn
               Type: Lambda
       DeliveryStreamType: DirectPut
+      DeliveryStreamName: !Ref CWEToFirehoseDeliveryStreamName
 
   # Source - Firehose Components - AWS S3 Bucket for file backup - AWS::S3::Bucket
   CWEBackupS3Bucket:
@@ -514,19 +447,20 @@ Resources:
             Effect: Allow
             Principal:
               Service: firehose.amazonaws.com
-  ##### CWE ##### 
-
+  #-------------------------------------------------------------------------------------------------------------------------------
+  # CloudWatch LOGS : Fetching Cloudwatch logs and pushing into splunk via kinesis firehose
+  # Source - CWL - CloudWatch - All cloudwatch logs into Firehose and Splunk - AWS::Events::Rule
+  #-------------------------------------------------------------------------------------------------------------------------------  
   ##### CWL #####
   ### Lambda Function that unzips logs related to Cloudwatch Logs(CWL)
   # Source - Firehose Components - FireHose Processor - AWS::Lambda::Function
-  
   CWLFirehoseProcessorLambdaFunction:
     Type: "AWS::Serverless::Function"
     Properties:
       Description: Stream events from CloudWatch Logs to Splunk using HTTP event collector
       MemorySize: 512
       FunctionName: !Ref FunctionLambda4FirehoseNameCWL
-      CodeUri: ./src/CWL
+      CodeUri: s3://lambdas-kinesis2splunk-eu-central-1/CWL/lambda_function.py.zip
       Handler: lambda_function.handler
       Runtime: python3.7
       Timeout: 300
@@ -557,6 +491,11 @@ Resources:
                   - logs:PutLogEvents
                 Resource:
                   - arn:aws:logs:*:*:*:*:*
+              - Effect: Allow
+                Action:
+                  - firehose:PutRecord
+                  - firehose:PutRecordBatch
+                Resource: "arn:aws:firehose:eu-central-1:xxxxxxxxxxxxx:deliverystream/CWLFirehoseDeliveryStream"
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -586,11 +525,11 @@ Resources:
             IntervalInSeconds: 300
             SizeInMBs: 1
         HECEndpointType: Event
-        HECToken: 1234-*****9e6
+        HECToken: !Ref SplunkHecToken
         HECAcknowledgmentTimeoutInSeconds: 180
         RetryOptions:
           DurationInSeconds: 300
-        HECEndpoint: https://xyz.com:8088
+        HECEndpoint: !Ref SplunkHecURL
         S3BackupMode: FailedEventsOnly
         ProcessingConfiguration:
           Enabled: true
@@ -608,6 +547,7 @@ Resources:
                       - Arn
               Type: Lambda
       DeliveryStreamType: DirectPut
+      DeliveryStreamName: !Ref CWLToFirehoseDeliveryStreamName
   
   # Source - Firehose Components - AWS S3 Bucket for file backup - AWS::S3::Bucket
   CWLBackupS3Bucket:
@@ -698,49 +638,59 @@ Resources:
             Effect: Allow
             Principal:
               Service: firehose.amazonaws.com
-  ##### CWL #####
-
+  #-------------------------------------------------------------------------------------------------------------------------------
+  # VPC Flow LOGS : Fetching Cloudwatch Event logs and pushing into splunk via kinesis firehose
+  # Source - CWL - CloudWatch - All cloudwatch logs into Firehose and Splunk - AWS::Events::Rule
+  #-------------------------------------------------------------------------------------------------------------------------------  
   ##### VPC #####
   ### Lambda Function that unzips logs related to VPC Flow Logs(VPC)
   # Source - Firehose Components - FireHose Processor - AWS::Lambda::Function
-
   VPCFirehoseProcessorLambdaFunction:
     Type: "AWS::Serverless::Function"
     Properties:
-      Description: Stream events from VPC Flow Logs to Splunk using HTTP event collector
+      Description: Stream events from VPC Flow Logs to Splunk via a HTTP event collector
       MemorySize: 512
       FunctionName: !Ref FunctionLambda4FirehoseNameVPC
-      CodeUri: ./src/VPC
+      CodeUri: s3://lambdas-kinesis2splunk-eu-central-1/VPC/lambda_function.py.zip
       Handler: lambda_function.handler
       Runtime: python3.7
       Timeout: 300
       Tracing: Active
-      Role:
-        Fn::GetAtt:
-          - VPCFirehoseProcessorRole
-          - Arn
+      Role: 'arn:aws:iam::xxxxxxxxxxxxx:role/VPCFirehoseProcessorLambdaFunctionRole'
   
-  # Source - Firehose Component - Firehose Processor Role - AWS::IAM::Role
-  VPCFirehoseProcessorRole:
+  # Lambda Function Role
+  VPCFirehoseProcessorLambdaFunctionRole:
     Type: AWS::IAM::Role
     Properties:
-      Path: /
+      Path: "/"
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      RoleName: VPCFirehoseProcessorLambdaFunctionRole
       Policies:
-        - PolicyName: VPCFirehoseProcessorPolicy
+        - PolicyName: VPCFirehoseLambdaProcessorPolicy
           PolicyDocument:
             Version: 2012-10-17
             Statement:
               - Effect: Allow
-                Action: logs:CreateLogGroup
-                Resource: arn:aws:logs:*:*:*
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - "*"
               - Effect: Allow
                 Action:
+                  - kinesis:GetRecords
+                  - kinesis:GetShardIterator
+                  - kinesis:DescribeStream
+                  - kinesis:ListStreams
+                  - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource:
-                  - arn:aws:logs:*:*:*:*:*
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - firehose:PutRecord
+                  - firehose:PutRecordBatch
+                Resource: "arn:aws:firehose:eu-central-1:xxxxxxxxxxxxx:*"
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -750,49 +700,114 @@ Resources:
             Principal:
               Service:
                 - lambda.amazonaws.com
+    
+  # Source - Firehose Component - Firehose Processor Role - AWS::IAM::Role
+  VPCFirehoseProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      RoleName: !Ref VPCFireHoseRoleName
+      Policies:
+        - PolicyName: VPCFirehoseProcessorPolicy
+          PolicyDocument: 
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 's3:AbortMultipartUpload'
+                  - 's3:GetBucketLocation'
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                  - 's3:ListBucketMultipartUploads'
+                  - 's3:PutObject'
+                Resource: 
+                  - !Sub 'arn:aws:s3:::${BucketNameValue}'
+                  - !Sub 'arn:aws:s3:::${S3BucketBkp}'
+                  - !Sub 'arn:aws:s3:::${S3BucketBkp}/*'
+              - Effect: Allow
+                Action:
+                  - 'lambda:GetFunctionConfiguration'
+                  - 'lambda:InvokeFunction'
+                Resource:
+                  - !GetAtt VPCFirehoseProcessorLambdaFunction.Arn
+                  - !Join [':',[!GetAtt VPCFirehoseProcessorLambdaFunction.Arn,'$LATEST']]
+              - Effect: Allow
+                Action:
+                  - 'logs:PutLogEvents'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/kinesisfirehose/${VPCFlowLogsToSplunkDeliveryStreamName}:log-stream:*'
+              - Effect: Allow
+                Action:
+                  - firehose:PutRecord
+                  - firehose:PutRecordBatch
+                Resource: 'arn:aws:firehose:eu-central-1:xxxxxxxxxxxxx:deliverystream/VPCFlowLogsToSplunkDeliveryStream'
+              - Effect: Allow
+                Action: 
+                  - kinesis:GetRecords
+                  - kinesis:GetShardIterator
+                  - kinesis:DescribeStream
+                  - kinesis:ListStreams
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                Resource: "*"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - firehose.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
   
-  # Source - Firehose Components - Firehose Delivery Stream - AWS::KinesisFirehose::DeliveryStream
+
+  
+  #--------------------------------------------------------------------
+  # Kinesis Firehose Delivery Stream that sends VPC Flow logs to Splunk  
+  #--------------------------------------------------------------------
+  ####Subscription filter construction
+  SubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties:
+      DestinationArn: !GetAtt VPCFirehoseDeliveryStream.Arn
+      FilterPattern: ""
+      LogGroupName: !Ref CloudwatchGroup
+      RoleArn: !GetAtt CWtoFHRole.Arn
+  
+  # Source - Firehose Components - Firehose Delivery Stream - AWS::KinesisFirehose::DeliveryStream i.e. VPCFlowLogsToSplunkDeliveryStreamName
   VPCFirehoseDeliveryStream:
     Type: AWS::KinesisFirehose::DeliveryStream
     Properties:
+      DeliveryStreamName: !Ref VPCFlowLogsToSplunkDeliveryStreamName
+      DeliveryStreamType: DirectPut
       SplunkDestinationConfiguration:
-        S3Configuration:
-          CompressionFormat: UNCOMPRESSED
-          BucketARN:
-            Fn::GetAtt:
-              - VPCBackupS3Bucket
-              - Arn
-          RoleARN:
-            Fn::GetAtt:
-              - VPCBackupS3Role
-              - Arn
-          BufferingHints:
-            IntervalInSeconds: 300
-            SizeInMBs: 1
-        HECEndpointType: Event
-        HECToken: 1234-***********-3421
         HECAcknowledgmentTimeoutInSeconds: 180
-        RetryOptions:
-          DurationInSeconds: 300
-        HECEndpoint: https://xyz.com:8088
-        S3BackupMode: FailedEventsOnly
+        HECEndpoint: !Ref SplunkHecURL
+        HECEndpointType: Raw
+        HECToken: !Ref SplunkHecToken
         ProcessingConfiguration:
           Enabled: true
           Processors:
             - Parameters:
-                - ParameterName: LambdaArn
-                  ParameterValue:
-                    Fn::GetAtt:
-                      - VPCFirehoseProcessorLambdaFunction
-                      - Arn
-                - ParameterName: RoleArn
-                  ParameterValue:
-                    Fn::GetAtt:
-                      - VPCBackupS3Role
-                      - Arn
+              - ParameterName: LambdaArn
+                ParameterValue: !GetAtt VPCFirehoseProcessorLambdaFunction.Arn
+              - ParameterName: RoleArn
+                ParameterValue: !GetAtt VPCFirehoseProcessorRole.Arn
               Type: Lambda
-      DeliveryStreamType: DirectPut
-  
+        RetryOptions:
+          DurationInSeconds: 300
+        S3BackupMode: FailedEventsOnly
+        S3Configuration: 
+          RoleARN: !GetAtt VPCFirehoseProcessorRole.Arn
+          BucketARN: !Sub 'arn:aws:s3:::${S3BucketBkp}'
+          BufferingHints:
+            IntervalInSeconds: 60
+            SizeInMBs: 50
+          CompressionFormat: UNCOMPRESSED
+          Prefix: firehose/
+
   # Source - Firehose Components - AWS S3 Bucket for file backup - AWS::S3::Bucket
   VPCBackupS3Bucket:
     Type: AWS::S3::Bucket
@@ -838,15 +853,8 @@ Resources:
             Effect: Allow
             Principal:
               Service: firehose.amazonaws.com
-  ##### VPC #####
 
 Outputs:
-  FireHoseRolName:
-    Value: !Ref FireHoseRole
-  FireHoseRolARN:
-    Value: !GetAtt FireHoseRole.Arn
-  VPCFlowLogGupName:
-    Value: !Ref VPCFlowGroup
   CWEFirehoseProcessorLambdaFunctionName:
     Description: The lambda Function Arn
     Value: !GetAtt CWEFirehoseProcessorLambdaFunction.Arn
